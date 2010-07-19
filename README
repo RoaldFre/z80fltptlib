@@ -1,0 +1,35 @@
+Z80 floating point library for fast Iterated Function System generator on a 
+TI-83/84 calculator.
+
+Specs of floating point library:
+  * 16 bit two's complement mantissa
+  * 8 bit two's complement exponent
+  * functions for sum, difference, product
+  * functions for transition between this format and the TI BCD format
+
+Specs of the IFS:
+  * Supports an arbitrary number of fixed points
+  * Each fixed point is characterized by:
+      - a coordinate
+      - a rotation angle
+      - a compression factor
+
+Notes on using the IFS Generator:
+  * Still only beta quality. A sierpinski triangle will work, but more 
+    elaborate systems (with rotations) might crash your calc
+  * Usage: use the TI-Basic wrapper IFSFPASM and make sure that Ans holds a 
+    matrix with on each row the x component, the y component, the rotation 
+    angle, the contraction factor of the fixed point.
+    For the sierpinsky triangle, you enter:
+       [[0,0,0,2],[0,1,0,2],[1,0,0,2]]:prgmIFSFPASM
+
+For more information, contact me (see contact info below).
+
+If you use or modify this code, please let me know so I can share in on the 
+fun ;-). (Also contact me for the exact licence on this code. It will 
+probably be under the GPL, but I haven't fullf made up my mind yet.)
+
+
+Roald Frederickx
+<roald [dot] frederickx [at] gmail [dot] com>
+

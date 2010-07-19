@@ -1,0 +1,319 @@
+;testfile to check floating point library
+
+#include "ti83plus.inc"
+
+.org $9D93
+.db	t2ByteTok, tAsmCmp
+
+savedsp .equ AppBackUpScreen
+
+	ld (savedsp),sp
+	;bcall(_NewLine)
+
+
+
+
+	bcall(_RclAns)
+	inc de
+	inc de
+	push de
+	ld hl,OP1
+	ld a,(hl)
+	cp ListObj
+	JP NZ,random
+
+	pop hl
+	push hl
+	bcall(_Mov9toOP1)
+	bcall(_PushRealO1)
+	;call printop1
+	call OP1toFLTPT
+	call C,overflow2
+
+	pop de
+	push hl
+	push bc
+	ex de,hl
+
+	ld bc,9
+	add hl,bc
+	bcall(_Mov9toOP1)
+	bcall(_PushRealO1)
+	;call printop1
+	call OP1toFLTPT
+	call C,overflow2
+	ex de,hl
+	ld a,c
+	pop bc
+	pop hl
+	ld b,a
+
+	JP add
+
+
+
+
+random:
+	call bcdrandom
+	call printop1
+	bcall(_PushRealO1)
+	bcall(_PushRealO1)
+	call op1tofltpt
+	jp c,overflow2
+;	call printhlc
+	push hl
+	push bc
+	call fltpttoop1
+	call printop1
+
+;	bcall(_GetKey)
+	
+	call bcdrandom
+	bcall(_PushRealO1)
+	call printop1
+	call op1tofltpt
+	jp c,overflow2
+;	call printhlc
+	push hl
+	push bc
+	call fltpttoop1
+	call printop1
+	
+;	bcall(_GetKey)
+;	call pause
+
+	pop bc
+	pop hl
+	;hl and c contain second number
+
+	pop de 	;"bc"
+	ld b,e	;previous exponent (first number)
+	pop de 	;"hl", first mantissa
+	
+	
+	;switch in correct order......
+	ld a,b
+	ld b,c
+	ld c,a
+	ex de,hl
+
+
+
+add:	
+	call printhlc
+	call printdeb
+	call FLTPTadd
+	jp pe,overflow2
+	call printhlc
+	call fltpttoop1
+	call printop1
+
+	
+
+	bcall(_PopRealO2)
+	bcall(_PopRealO1)
+
+	bcall(_FPAdd)
+	call printop1
+	
+;	bcall(_NewLine)
+	
+	ld sp,(savedsp)
+	ret
+
+
+
+	
+
+bcdrandom:
+	push af
+	push bc
+	push de
+	push hl
+	bcall(_Random)
+	bcall(_Times2)
+	bcall(_Minus1)
+	ld hl,OP1
+	bcall(_Mov9toOP2)
+	ld hl,bcdlarge
+	bcall(_Mov9toOP1)
+	bcall(_YtoX)
+	;OP1 now has random number "with wide range"
+	bcall(_PushRealO1)
+	bcall(_Random)
+	bcall(_Times2)
+	bcall(_Minus1)	;rand between -1 and 1 to set sign
+	bcall(_PopRealO2)
+	bcall(_FPMult)
+	;OP1 now has rand number with random sign
+	pop hl
+	pop de
+	pop bc
+	pop af
+	ret
+
+bcdlarge:
+;	.DB $00, $E3, $99, $99, $99, $99, $99, $99, $99
+	.DB $00, $A0, $10, $00, $00, $00, $00, $00, $00
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
+	bcall(_RclAns)	;i expect a real answer
+
+;	call printop1
+;
+;	call OP1toA
+;	call C,overflow2
+;	ld c,a
+;	ld hl,0
+;	call printhlc
+;	ret
+	
+    call printop1
+	call OP1toFLTPT
+	call c,overflow2
+	call printhlc
+	ld sp,(savedsp)
+	call FLTPTtoOP1
+	call printop1
+	bcall(_NewLine)
+
+	ld sp,(savedsp)
+	ret
+
+	
+	
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+	ld HL,		%0100000000000000
+	LD C,		0
+	ld DE,		%0000000000000000
+	ld B,		0	
+
+	push bc
+	push de
+	push hl
+
+	call sum
+	jp pe, overflow
+	call printhlc
+
+	call toHL
+	call c, overflow2
+	push hl
+	bcall(_NewLine)
+	pop hl
+	bcall(_DispHL)
+
+	
+	pop hl
+	pop de
+	pop bc
+
+	call sum
+	jp pe,overflow
+	
+	call toA
+	call c,overflow2
+	ld l,a
+	ld h,0
+	push hl
+	bcall(_NewLine)
+	pop hl
+	bcall(_DispHL)
+
+
+
+
+	LD sp,(savedsp)
+	ret
+
+
+
+
+overflow2:
+	push bc
+	push hl
+	push de
+	push af
+
+	bcall(_NewLine)
+	ld hl, over2msg
+	bcall(_PutS)
+
+	pop af
+	pop de
+	pop hl
+	pop bc
+	ld sp,(savedsp)
+	ret
+
+over2msg:
+	.DB "overflow!",0
+
+
+
+
+overflow:
+	push BC
+	push hl
+
+	bcall(_NewLine)
+	
+	ld a,7
+	ld (CurCol),a
+	pop hl
+	bcall(_DispHL)
+
+	ld a,1
+	ld (CurCol),a
+	pop hl
+	ld h,0
+	bcall(_DispHL)
+
+	ld a,0
+	ld (CurCol),a
+	ld hl, message
+	bcall(_PutS)
+
+	ld sp,(savedsp)
+	ret
+
+
+message:
+	.DB "OV",0
+
+
+
+
+
+#include "fltptlib.z80"
+
+.end
+

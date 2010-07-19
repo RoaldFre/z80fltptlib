@@ -1,0 +1,1501 @@
+;AUTHOR: ROALD FREDERICKX
+;DATE: started @ 21/04/2009
+
+;DESCRIPTION:
+;24 bit floating point routines for the z80 microprocessor
+
+;NUMBER FORMAT:
+; 8bits exponent -- two's complement
+; 16bits base -- bit 15 is sign bit => only 15bits precision
+
+;Roughly meaning:
+;smallest non-zero value: 2.938e-39
+;largest value from exponent: 1.7014e38
+;base values: -32767 to 32767
+;largest total value: 5.575e42
+;significant digits (decimal): "4.5"
+	
+
+
+;GENERAL NOTES:
+; I'm trying to keep everything in-register. 
+; Outputs will always be:
+;  mantisse: HL
+;  exponent: C
+; Inputs are in the form of:
+;  mantisse1: HL
+;  exponent1: C
+;  mantisse2: DE
+;  exponent2: B 
+; Flags:
+;  Overflows will be denoted with either the Carry of the Parity/overflow flag
+;
+; Speed gets priority above size most of the time
+
+
+
+
+
+
+;Frequently used stuff:
+;======================
+
+
+;OVERFLOW
+;--------
+;We probably won't be able to jump to here using JR, but that is a bonus, since hopefully overflows
+;won't happen too often, and when the condition is negative, JP is actually faster than JR :-)
+floatOverflowPE:
+	LD A,%01111111	;+127
+	INC A		;+127 + 1 -> -128   => overflow flag set
+	RET		;return
+
+
+;NORMAL RETURN
+;-------------
+;We need to reset the overflow flag...
+floatReturnPVreset:
+	XOR A		; A = 0
+	INC A		; 0 + (+1) = +1, so overflow flag is reset
+	RET
+
+
+
+
+
+;Debugging stuff:
+;================
+
+;Pushes everyting, including OP1 and OP2, doesn't alter registers
+#define PUSHALL		push af\ push bc\ push de\ push hl\ push ix\    push af\ push bc\ push de\ push hl\ push ix\    bcall(_PushRealO1)\ bcall(_PushRealO2)\   pop ix\  pop hl\  pop de\  pop bc\  pop af
+			
+;Pops everything that has been pushed with PUSHALL
+#define POPALL		bcall(_PopRealO2)\  bcall(_PopRealO1)\  pop ix\  pop hl\  pop de\  pop bc\  pop af
+
+
+;PRINT A
+;-------
+printa:
+	PUSHALL
+	push af
+	bcall(_NewLine)
+	pop af
+	ld h,0
+	ld l,a
+	bcall(_DispHL)
+	POPALL
+	ret
+
+
+
+
+;PRINT HL & C
+;------------
+printhlc:
+	PUSHALL
+	push bc
+	push hl
+	bcall(_NewLine)
+	ld A,7
+	ld (CurCol),A
+	pop hl
+	bcall(_DispHL)
+	ld A,0
+	ld (CurCol),A
+	pop hl
+	ld h,0
+	bcall(_DispHL)
+	POPALL
+	ret
+
+
+
+;PRINT DE AND B
+;--------------
+printdeb:
+	EX DE,HL
+	push bc
+	ld c,b
+	call printhlc
+	pop bc
+	EX DE,HL
+	ret
+
+
+;PRINT BCD FLOATING POINT NUMBER IN OP1
+;--------------------------------------
+printop1:
+	PUSHALL
+	bcall(_NewLine)
+	ld A,(IY+fmtFlags)
+	ld (IY+fmtOVerride),A	;use current formatting, is this necessary??
+	bcall(_FormBase)	;gets OP1 to a string starting at OP3
+	ld hl,OP3		;load pointer
+	bcall(_PutS)		;print it
+	POPALL
+	ret
+
+printop2:
+	PUSHALL
+	bcall(_OP2toOP1)
+	call printop1
+	POPALL
+	ret
+
+
+;PRINT C-HL AS A FLOATING POINT
+;------------------------------
+pchl:
+	PUSHALL
+	call fltpttoop1
+	call printop1
+	POPALL
+	ret
+
+;PRINT B-DE AS A FLOATING POINT
+;------------------------------
+pbde:
+	PUSHALL
+	ld c,b
+	ex de,hl
+	call fltpttoop1
+	call printop1
+	POPALL
+	ret
+
+
+
+;PRINT MARKER
+;------------
+_printmarker: ;gets pointer to string in hl
+	PUSHALL		
+	push hl
+	bcall(_NewLine)
+	pop hl
+	bcall(_PutS)
+	POPALL
+	ret
+
+printmrk1:
+	push hl
+	ld hl,marker1
+	call _printmarker
+	pop hl
+	ret
+printmrk2:
+	push hl
+	ld hl,marker2
+	call _printmarker
+	pop hl
+	ret
+printmrk3:
+	push hl
+	ld hl,marker3
+	call _printmarker
+	pop hl
+	ret
+printmrk4:
+	push hl
+	ld hl,marker4
+	call _printmarker
+	pop hl
+	ret
+printmrk5:
+	push hl
+	ld hl,marker5
+	call _printmarker
+	pop hl
+	ret
+printmrk6:
+	push hl
+	ld hl,marker6
+	call _printmarker
+	pop hl
+	ret
+
+
+marker1:
+	.DB "MARKER1",0
+marker2:
+	.DB "MARKER2",0
+marker3:
+	.DB "MARKER3",0
+marker4:
+	.DB "MARKER4",0
+marker5:
+	.DB "MARKER5",0
+marker6:
+	.DB "MARKER6",0
+
+
+
+;PAUSE
+;-----
+pause:
+	push hl
+	push af
+	ld hl,0
+pauseloop:
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	dec hl
+	ld a,h
+	or l
+	jr nz,pauseloop
+	pop af
+	pop hl
+	ret
+
+
+;MINIPAUSE
+minipause:
+	push bc
+	ld b,100
+minipauseloop:
+	djnz minipauseloop
+	pop bc
+	ret
+
+
+;ENTER-PAUSE
+;-----------	
+enterpause:
+	PUSHALL
+	bcall(_GetKey)
+	POPALL
+	ret
+
+
+
+
+
+;=========================================================================================
+;					DIFF
+;=========================================================================================
+; See: SUM
+diff:
+FLTPTsub:
+	;just negate DE and add
+	LD A,D
+	XOR %10000000	;flip sign bit
+	LD D,A
+
+	;natural fall-through to sum below:
+
+;=========================================================================================
+;					SUM
+;=========================================================================================
+; Destroys: xxxxxxxxx
+; P/V denotes overflow
+
+sum:
+FLTPTadd:
+	;test for one of the arguments being zero
+	;if DE is zero, return is easy
+	LD A,D
+	AND %01111111	;loose the sign flag (might get set doing a FLTPTsub, or it might
+			;have been set in another strange way ... either way: it's irrelevant)
+	OR E
+	JP Z,floatReturnPVreset	;just return: DE is zero, so HL and C make up the answer
+	;test for HL being zero
+	LD A,H
+	AND %01111111
+	OR L
+	JR NZ,sumBothNot0
+	;HL was zero: return DE,B in HL,C and reset P/V
+	LD C,B
+	EX DE,HL
+	XOR A
+	INC A		;P/V is now reset
+	RET
+
+
+sumBothNot0:
+	;get our mantissas in two's complement form for easy adding
+	;NOTE: isn't there a nicer way to do this, using NEG for example, or bitmaksing the
+	;sign bit and doing a: SUB HL,DE with HL being 0 and DE being the number to negate...?
+	BIT 7,H
+	JR Z,sumFirstPos
+			;no need to bitmask the signbit either, since it is zero
+	;negation in two's complement == flip bits and add one
+	LD A,L		;start with lower byte (even though we already had upper byte,
+			;we need to know if the lower byte triggered a carry or not)
+	CPL		;XOR %11111111	
+			;do the negation the manual (and slow) way instead of NEG because...
+	ADD A,1		;... we need to get the carry here ...
+	LD L,A
+	LD A,H
+	JR C,sumFirstNegCarry	;... to test for it here ...
+	;no carry, so just flip bits, keep sign bit intact (it is already set in our format
+	;and we want to keep it set to have a correct two's complement format)
+	XOR %01111111
+	LD H,A
+	JR sumFirstPos	;well, "it is now" :-)
+sumFirstNegCarry:
+	XOR %01111111
+	INC A	;... to add it here.
+		;Can we get an "overflow" here? That happens if A was 1000 0000 (-0) before
+		;flipping and now reads 1111 1111 + 1 = (1) 0000 0000, which is OK (+0).
+		;No "true" overflow can happen here  [[ NOTE: VERIFY THIS TO BE SURE ]] )
+	LD H,A		;store 
+	;NOTE: the above looks hideous, but a simple XOR & ADC won't do because XORing A will
+	;reset the carry flag before it can be added tot the flipped number :-(
+	;NOTE2: maybe do a CPL and an ADC 128 (CPL doesn't change carry flag, and ADC adds
+	;the carry flag and re-sets bit 7  (( is this faster/smaller? ))
+	
+	;NOTE3: better yet, maybe I should just push/pop de and do a:
+	;ld de,0 \ ex de,hl \ and a \ sbc hl,de
+	;but then i'd have to unset signflag first, so probably not faster :-( 
+	;[TODO: check to be sure]
+
+
+sumFirstPos:
+	;test for the second argument being negative
+	BIT 7,D
+	JR Z, sumSecondPos
+	LD A,E
+	CPL		;XOR %11111111
+	ADD A,1 	;INC A doesn't set carry >_<
+	LD E,A
+	LD A,D
+	JR C,sumSecondNegCarry
+	XOR %01111111
+	LD D,A
+	JR sumSecondPos
+sumSecondNegCarry:
+	XOR %01111111
+	INC A
+	LD D,A
+	
+
+;arguments are now in two's complement form
+sumSecondPos:
+	LD A,C		;grab our first exponent to work with
+	SUB B		;substract second exponent from first one 
+	JR Z,sumAdd	;if both are the same: just add
+
+	;We now need to find out wether C or B is the larger one
+	;remeber that we're dealing with signed numbers, so a simple JR C,xx
+	;won't do here.
+	;It follows that C=A > B   <=>   Sign and P/V flags are the same
+	;In the code below, we switch the mantissa's (HL and DE) in such a way
+	;that the one representing the largest value is in HL. The corresponding
+	;exponent will be in C. This means that we know that the difference in
+	;the exponents (1st - 2nd) will be positive. Therefore, we make the 
+	;difference (in A) an *un*signed number below, to ease comparison *and*
+	;to avoid overflow-issues. We only need this number to determin how 
+	;many bits to shift the smaller mantissa (DE) before we add them.
+	
+	;http://dragonfire.unitedti.org/asmin28/lesson/day08.html#sig
+
+		;TODO: do some XOR magic with sign flags
+		;TODO: do some XOR magic with sign flags
+		;TODO: do some XOR magic with sign flags
+
+	;ugly way... TODO: find alternative
+	;sub won't do ... signed overflows >_<
+	BIT 7,C
+	JR Z,sumCpos
+	;C is negative
+	BIT 7,B
+	JR Z,sumDeltaExpSwap	;C negative, B positive => swap numbers
+	;both are negative
+	;A still holds C-B
+	;we now still need to check wich one was larger, we can use the sign
+	;flag for that, because there can't have been any signed overflows
+	;(subtracting numbers of like sign always decreases the absolute value)
+	AND A		;set flags
+	JP M,sumDeltaExpSwap
+	JR sumDeltaExpPositive
+
+	
+sumCpos:
+	BIT 7,B
+	JR Z,sumCposBpos
+	;C is positive, B negative: numbers in correct order and A hold a positive number
+	JR sumDeltaExpPositive
+
+sumCposBpos:
+	;watch sign of A for the comparison, there can't have been an overflow
+	;(sub of like signs)
+	AND A
+	JP P,sumDeltaExpPositive
+	;and fall-through to swap
+
+sumDeltaExpSwap:
+	;result was negative: swap
+	NEG		;make A positive
+	LD C,B		;get largest exponent in C to use later on
+	EX DE,HL	;and swap mantissas
+
+sumDeltaExpPositive:
+	;difference of exponents is strictly positive ("|HL| is larger than |DE|")
+	;difference is stored in A as an unsigned number
+	CP 15		
+	JR NC,sumReformatFrom2cpl
+		;We need to shift 16b or more, this will just have the effect
+		;of adding zero, so return with HL being sum and C being exponent.
+	CP 8	;see if we can discard the LSB of DE
+	JR C,sumShiftLessThan8	;we need to shift strictly less than 8 bits, 
+				;so we need to keep an eye on both bytes (including MSB)
+
+;we need to shift 8 bits or more, either way: we can switch the MSB of DE to the LSB
+;and clear the MSB, but keeping an eye on the sign!
+	LD E,D
+	LD D,0		;zero MSB -- note, this is only OK if number was positive, so:
+	BIT 7,E		;grab sign-bit
+	JR Z,sum8orLessDEPositive
+	DEC D		;dec D to get 11111111
+sum8orLessDEPositive:
+	SUB 8		;We've already shifted 8 bits
+	JR Z,sumAdd	;we needed to shift 8 bits, which we just did, so we're ready to add
+
+	;we need to shift the LSB between 1 and 7 bits. Do so here:
+	LD B,A		;set counter
+sumSMT8Loop:
+	SRA E;		;arithemetic shift, b7 (sign) gets preserved
+	DJNZ sumSMT8Loop
+	JR sumAdd;	;ready to add!
+
+
+;we need to shift less than 8 bits, so keep an eye on both bytes of DE:
+sumShiftLessThan8:
+	LD B,A		;set our counter
+sumSLT8Loop:
+	SRA D		;arithmetic shift, preserves sign (b7 gets preserved); b0 to C
+	RR E		;rotate, C to b7
+	DJNZ sumSLT8Loop	;loopty-loop
+;I've put this part at the bottom (shifting less than 8, so I don't need a jump
+;to sumAdd here. I'm guessing that it will be more common to add values that are 
+;close together, so give them the speed-advantage
+
+
+;Finally, do the actual adding!
+;Wat we've got: HL and DE are nicely aligned to add, and C contains the exponent of HL
+;(the largest number)
+sumAdd:
+	;we need to add each byte seperatly because for some reason doing an ADD HL,DE
+	;doesn't set the P/V flag, so no way of checking for overflows	
+	;ADD HL,DE: 11 T-sates
+	LD A,L		;4
+	ADD A,E		;4
+	LD L,A		;4
+	LD A,H		;4
+	ADC A,D		;4   add with carry, P/V flag gets set here
+	LD H,A		;4
+			;total: 24 T-states, that's 13 extra for getting an overflow flag >_<
+
+	JP PO,sumReformatFrom2cpl
+	;we had an overflow, so the sum of two positives became negative, or the sum
+	;of two negatives became positive
+	JP P,sumOverflowPositive
+	;we overflowed from two positives to a "negative answer" (the MSbit got set,
+	;but it isn't supposed to be a sign flag)
+	SRL H		;shift HL to the right, putting a zero at b15 (answer is positive!)
+	RR L
+	INC C	
+	;that's all folks, no need to negate the answer or annything ...
+	RET		;note: P/V correctly indicates overflows
+
+
+sumOverflowPositive:
+	;we overflowed from two negatives to a positive answer
+	;we need to shift the entire positive answer to the right, and set the 
+	;sign bit, then reformat it (it should still be negated!)
+	SCF 	;set carry flag
+	RR H	;rotate H to the right, putting a 1 at b15 (to indicate negative answer)
+	RR L
+	INC C	;increment exponent
+       ; RET	;all is set, we've got sign flag at b15 of HL and the rest of
+       ; 	;HL represents the 15 bytes of the positive mantisse
+       ; 	;also: the P/V flag correctly indicates overflows (it's unset if the INC C
+       ; 	;went smoothly, or set if the INC C overflowed, in which case we can't
+       ; 	;store the number in our floating point format)
+	;reformatting necesarry! (two's compelement)
+	;natural fall-through:
+
+
+sumReformatFrom2cpl:
+	;if there was no overflow, we need to negate the answer if it is negative,
+	;we also need a way to save a sign-flag bitmask, do so here:
+	LD D,0		;empty bitmask in D
+
+	BIT 7,H
+	JR Z,sumNoOverPositive
+	;two's complement answer is negative -> negate answer
+	;don't append a sign flag yet
+	ex de,hl
+	ld hl,0
+	and a		;clear carry
+	sbc hl,de	; hl(=0) - de('=hl) - carry
+			; => hl now holds the negated value
+	ld d,$80	;and set bitmask
+
+sumNoOverPositive:	;HL is now positive and signmask is in D
+	;now shift everything to the left until bit 14 of HL (b6 of H) becomes 1
+	;first check for the answer being zero so we won't loop infinitly...
+	LD A,H
+	OR L		;HL == 0   <=>   ( H | L ) == 0
+	JR NZ,sumNotZero
+	;it's zero!
+	LD C,0		;NOTE, MAYBE PICK $80 (-128), FOR IT IS THE SMALLEST POSSIBLE NUMBER
+			;so that, for example, in an addition, it always gets recognised as
+			;smallest...
+	XOR A		;zero A			TODO: better way to reset P/V?
+	;A is now zero, so do an INC to reset P/V flag and return
+	INC A
+	RET
+
+sumNotZero:
+	BIT 6,H
+	JR NZ,sumReformat 	;if bit 6 of H is set, then no need to shift
+			
+sumShiftloop:
+	ADD HL,HL	;HL * 2
+	DEC C		;don't forget to adjust exponent...
+	JP PE,floatOverflowPE
+	BIT 6,H
+	JR Z,sumShiftLoop
+
+	;ready to reformat:
+	
+sumReformat:
+	;set sign flag according to mask
+	LD A,H
+	OR D		;OR with bitmask in D
+	LD H,A
+	;all done: return and reset P/V
+	XOR A
+	INC A
+	ret
+
+
+	
+
+
+
+
+
+;=========================================================================================
+;					PROD
+;=========================================================================================
+;P/V denotes overflow
+;Destorys: a lot, !!INCLUDING IX!!
+
+;NOTE: MAYBE HANDLE AN OVERFLOW "IN THE TINY DIRECTION" BY RETURNING ZERO? (in case
+;some rouding errors end up with litlle values that should actually be zero, etc etc ..?)
+
+prod:
+FLTPTmult:
+;check for at least one value being zero:
+;if HL is zero, return is easy...
+	LD A,H
+	AND %01111111		;ignore sign flag
+	OR L
+	JR NZ,prodHLnot0	;wasn't zero
+	JP floatReturnPVreset	;HL was zero, so return (I assume that the exponent C is
+				;set correctly, also being zero)
+prodHLnot0:
+	LD A,D
+	AND %01111111		;ignore sign flag
+	OR E
+	JR NZ,prodDEnot0
+	;it's zero, so return zero:
+	EX DE,HL	;faster than: LD HL,0
+	LD C,B		;faster than: LD C,0. I assume B is correctly zero
+	;reset P/V:
+	XOR A
+	INC A
+	RET
+
+
+prodDEnot0:
+;let's compute the resulting exponent first, see if we won't overflow there
+;we'll be multiplying two positive numbers of "15 bits" (upper bit is sign and will be made zero)
+;the result will be a 30bit number, (upper two bits zero). We'll need to shift it to the
+;left at least once (we only need "one zero bit" in front, the sign bit). But it's also
+;possible we'll need to shift twice as we also might end up with a "29 bit" number, eg:
+; 010 * 010 = 000100 "29 bit"  ->  010000 (exponent--)
+; 011 * 011 = 001001 "30 bit"  ->  010010 (exponent is OK)
+; ^sign                            ^sign 
+	LD A,C
+	SCF		;set carry
+	ADC A,B		;A = B + C + 1		TODO: why do i need this??
+	RET PE		;overflow can happen (using ADC: only need to check once)
+	.DB $DD
+	LD L,A		;no overflow, store exponent in IXL
+
+
+;no overflow: too bad, we actualy need to get numbercrunching
+;use XOR to find sign of outcome
+	LD A,H
+	XOR D		;XOR MSB of first argument with MSB of second argument
+	AND %10000000	;if an uneven number of "sign flags" -> b7 is high
+	.DB $DD
+	LD H,A		;get the sign-bitmask stored in IXH for later use 
+
+	;clear the sign bits
+	LD A,H
+	AND %01111111
+	LD H,A
+	LD A,D
+	AND %01111111
+	LD D,A
+
+
+	;multiply:
+	;BC is free to modify, HL and DE need to be multiplied (A is also free)
+	LD B,15		;set up our counter  NOTE: scince b15 of HL is zero, we only need
+			;to loop over it 15 times actually, [IMPROVE THIS IN THE FUTURE]
+	LD C,H		;get HL to "CA"  -> multiply CA by DE
+	LD A,L
+	LD HL,0		;lower 16 bits of result
+
+	;it looks as though we've got ourselves 16b of storage space too little, but as we
+	;shift through CA, we free up bits that we can use to store the upper 16 bits of 
+	;the result in! => multiply CA by DE, result in CAHL
+	;inspiration: http://map.grauw.nl/articles/mult_div_shifts.php
+
+
+prodLoop:
+	ADD HL,HL	;shift HL to the left ("HL * 2")
+	RLA		;get carry to A if any and rotate the bits of the argument 
+	RL C		;we've now rotated "CA" to the left (or AC to the right) getting
+			;bit number B of the original AC in the carry
+	JR NC,prodNoAdd	;if the original AC didn't contain a 1 at position B, don't add
+	ADD HL,DE
+	ADC A,0		;add carry to A
+	JR NC,prodNoAdd ;
+	INC C		;if above created carry on A: increment C
+prodNoAdd:
+	DJNZ prodLoop
+
+	;the 16'th iteration can be done by just shifting CAHL to the left,
+	;because bit15 of the (second) multiplicand is always zero
+	;We only need to shift CAH now, HL will be discarded anyway
+	SLA H 		;grab carry
+	RLA		;rotate A
+	RL C		;rotate C
+	
+	;as explained above, we always need to shift once more
+	SLA H
+	RLA
+	RL C
+
+	;there is a chance we'll need to shift once more, test for it here:
+	BIT 6,C
+	JR NZ,prodNoExtraShift
+	SLA H
+	RLA
+	RL C
+	.DB $DD
+	DEC L		;don't forget to decrement exponent (IXL)
+	RET PE		;overflow
+
+prodNoExtraShift:
+	LD L,A		;get A stored in L, it is ready to be returned now
+	LD A,C		;get the upper byte of answer in A, so we can set sign flag
+	.DB $DD
+	OR H		;OR A with IHX, our signbitmask
+	LD H,A		;HL is now correct for return
+	.DB $DD
+	LD C,L		;and get exponent from IXL
+	;all went wel to return: clear P/V
+	XOR A
+	INC A
+	RET
+
+
+
+
+
+	
+	
+	
+
+;=========================================================================================
+;					FLTPTCOMP
+;=========================================================================================
+;Compare two floating point numbers.
+;Returns: Carry gets set if (C-HL) < (B-DE)
+;Destroys: A, C-HL and B-DE
+
+;NOTE: I HAVEN'T TESTED ANY OF THIS YET !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+FLTPTcomp:
+	;first see if one is zero (because sign and exponent will be random then)
+	LD A,D
+	AND %01111111
+	OR E
+	JR NZ,FLTPTcompDEnot0
+	;B-DE was zero: sign of C-HL determines relation
+	SLA H		;Sign flag of C-HL to carry. This gives us a correct return value
+	RET
+
+FLTPTcompDEnot0:
+	;maybe C-HL is zero?
+	LD A,H
+	AND %01111111
+	OR L
+	JR NZ,FLTPTcompBothNot0
+	LD A,D
+	CPL		;flip all bits (including sign)
+	SLA A		;carry gets set correctly
+	RET
+
+FLTPTcompBothNot0:
+	;compare signs
+	LD A,H
+	AND A
+	JP P,FLTPTcompHLpos
+	;C-HL is negative
+	LD A,D
+	AND A
+	JP M,FLTPTcompBothNegative
+	;C-HL is negative, B-DE is positive: return with carry set
+	SCF
+	RET
+
+FLTPTcompHLpos:
+	LD A,D
+	AND A
+	JP P,FLTPTcompBothPositive
+	;C-HL is positive, B-DE is negative: return with carry cleared
+	;note that the "AND A" above has left carry unset, so just return
+	RET
+
+FLTPTcompBothNegative:
+	;both are negative: make positive and swap values, continue as if they are positive
+	;swap exponents:
+	LD A,C
+	LD C,B	
+	LD B,A
+	;make mantissas positive
+	LD A,H	
+	AND %01111111
+	LD H,A
+	LD A,D
+	AND %01111111
+	LD D,A
+	EX DE,HL	;swap mantissas
+	;fall-through to FLTPTcompBothPositive
+
+FLTPTcompBothPositive:
+	;compare exponents
+	LD A,C
+	SUB B
+	JR Z,FLTPTcompExpEqual
+	;Exponents not equal, give this the speed-advantage
+	;compare sign of exponents. Note that they are signed values.
+	;http://dragonfire.unitedti.org/asmin28/lesson/day08.html#sig
+	JP PO, $+5	;no overflow, skip the XORing ("XOR with zero")
+	XOR $80		;XOR sign bit
+	;We can now use M for (C < B), P for (C >= B)
+	;note: we already know: C != B
+	;So return with carry unset if we have M flag, else return with carry set
+	RET P		;note that XORing has unset carry
+	SCF
+	RET
+
+FLTPTcompExpEqual:
+	;both HL and DE are now positive (unsigned) numbers
+	;subtract them and carry gives what we want
+	AND A		;reset carry for the subtraction
+	SBC HL,DE
+	RET		;carry correctly indicates the relation
+
+
+
+
+
+
+
+
+
+;=========================================================================================
+;					TOA
+;=========================================================================================
+;Converts a floating point number in C-HL to a regular signed number in A.
+;No rounding gets done.
+;Carry flag denotes overflow.
+;Destroys HL,B
+;NOTE: -128 will be regarded as an overflow and will not be returned as -128!
+
+
+toA:
+FLTPTtoA:
+	;Get HL in two's complement form. Note that I do this before testing for
+	;trivial cases to make return easy when C is 6.
+	BIT 7,H
+	JR Z,toACheckTriv	;it's positive
+	LD A,L
+	CPL		;XOR %11111111
+	ADD A,1 	;INC A doesn't set carry >_<
+	LD L,A
+	LD A,H
+	JR C,toANegCarry;
+	XOR %01111111
+	LD H,A
+	JR toACheckTriv
+toANegCarry:
+	XOR %01111111
+	INC A
+	LD H,A
+
+
+
+
+
+toACheckTriv:
+	;Check for trivial cases. If C is less than zero, output will be zero.
+	;So, check sign bit of C
+	BIT 7,C
+	JP NZ,toAReturnZero	;if C is strictly less than zero
+	LD A,6
+	SUB C		;we need to shift (6-C) bits
+			;because: the mantissa is a "1.xxx number". We multiply
+			;it with 2^C to get the full number. C can be 6 at most,
+			;because a signed byte can only hold up to 2^6 * "1.999"
+			;NOTE: we regard (-128) as an overflow here, although that
+			;is a perfectly acceptable signed number...
+	LD B,A		;B now stores the number of bits to shift to the right
+	RET C		;if (6-C) triggers a carry, then C was 7 or more and
+			;an overflow will happen, so return with carry set
+	LD A,H		;get the number to shift in A
+	RET Z		;if (6-C) is zero (C=6), then no need to shift
+			;we can just return with carry correctly unset, and A
+			;containing the right number in the right form
+
+	;B is set up correctly as counter (1 <= B <= 5), so just start shifting:
+toAShift:
+	SRA A
+	DJNZ toAShift
+	
+	AND A		;clear carry
+	RET		;all done!
+	
+toAReturnZero:
+	XOR A		;zero A and clear carry in one swing
+	RET
+
+
+
+
+
+;=========================================================================================
+;					TOAROUND
+;=========================================================================================
+;Converts a floating point number in C-HL to a regular signed number in A.
+;Number gets rounded.
+;P/V flag denotes overflow, [WARNING:] this is unlike the above routine which uses carry!!
+;Destroys HL,B,C
+;NOTE: -128 will be regarded as an overflow and will not be returned as -128!
+
+toAround:
+FLTPTtoAround:
+	;Get HL in two's complement form. 
+	BIT 7,H
+	JR Z,FLTPTtoAroundCheckTriv	;it's positive
+	LD A,L
+	CPL		;XOR %11111111
+	ADD A,1 	;INC A doesn't set carry >_<
+	LD L,A
+	LD A,H
+	JR C,FLTPTtoAroundNegCarry;
+	XOR %01111111
+	LD H,A
+	JR FLTPTtoAroundCheckTriv
+FLTPTtoAroundNegCarry:
+	XOR %01111111
+	INC A
+	LD H,A
+
+
+
+FLTPTtoAroundCheckTriv:
+	;Check for trivial cases. If C is less than zero, output will be one (rounded)
+	;or zero. So, check sign bit of C
+	BIT 7,C
+	JP NZ,FLTPTtoAroundCnegative	;if C is strictly less than zero
+	;C is positive
+	LD A,6
+	SUB C		;we need to shift (6-C) bits
+			;because: the mantissa is a "1.xxx number". We multiply
+			;it with 2^C to get the full number. C can be 6 at most,
+			;because a signed byte can only hold up to 2^6 * "1.999"
+			;NOTE: we regard (-128) as an overflow here, although that
+			;is a perfectly acceptable signed number...
+	JR C,FLTPTtoAroundOverflow	;if (6-C) triggers a carry, then C was 7 or more 
+					;and an overflow will happen
+	JR Z,FLTPTtoAroundNoShifting	;if (6-C) is zero (C=6), then no need to shift
+	LD B,A		;B now stores the number of bits to shift to the right
+	LD A,H		;get the number to shift in A
+
+	;B is set up correctly as counter (1 <= B <= 5), so just start shifting:
+FLTPTtoAroundShift:
+	SRA A
+	DJNZ FLTPTtoAroundShift
+	;done shifting, carry gives the last bit shifted. To round our answer, we
+	;need to add this to A
+	LD B,0
+	ADC A,B		;add carry, an overflow can happen here
+	RET		;all done! P/V detects overflow
+	
+FLTPTtoAroundCnegative:
+	;If C is exactly -1, then our value lies between 0.5 and 1: so return one
+	;else return zero
+	LD A,C
+	CP -1
+	JR NZ,FLTPTtoAroundReturnZero
+	XOR A
+	INC A		;A is now 1, and P/V is unset
+	RET
+
+FLTPTtoAroundReturnZero:
+	XOR A
+	;C is a negative value between -127 and -2 (inclusive), doing an INC C
+	;will therefore reset the P/V flag
+	INC C
+	RET
+
+FLTPTtoAroundNoShifting:
+	;but still some rounding...
+	XOR A
+	SLA L
+	ADC A,H		;A = H + (b7 of L)
+	RET		;P/V correctly denotes overflow
+
+FLTPTtoAroundOverflow:
+	;set the P/V flag:
+	LD A,-128
+	DEC A
+	RET
+
+
+
+
+
+;=========================================================================================
+;					TOHL
+;=========================================================================================
+;Converts a floating point number in C-HL to a regular signed number in HL
+;Carry flag denotes overflowr.
+;No rounding gets done.
+;Destroys: A,B
+;NOTE: -32768 is regarded as an overflow and will not be returned as -32768!
+
+;NOTE: I HAVEN'T TESTED THIS YET [??]
+
+toHL:
+
+	;Get HL in two's complement form. Note that I do this before testing for
+	;trivial cases to make return easy when C is 14.
+	BIT 7,H
+	JR Z,toHLCheckTriv	;it's positive
+	LD A,L
+	CPL		;XOR %11111111
+	ADD A,1
+	LD L,A
+	LD A,H
+	JR C,toHLNegCarry;
+	XOR %01111111
+	LD H,A
+	JR toHLCheckTriv
+toHLNegCarry:
+	XOR %01111111
+	INC A
+	LD H,A
+
+
+toHLCheckTriv:
+	;Check for trivial cases. If C is less than zero, output will be zero.
+	;So, check sign bit of C
+	BIT 7,C
+	JP NZ,toHLReturnZero	;if C is strictly less than zero
+	LD A,14
+	SUB C		;we need to shift (14-C) bits
+			;because: the mantissa is a "1.xxx number". We multiply
+			;it with 2^C to get the full number. C can be 14 at most,
+			;because a signed short can only hold up to 2^14 * "1.999"
+			;NOTE: we regard (-2^15) as an overflow here, although that
+			;is a perfectly acceptable signed number...
+	RET C		;if (14-C) triggers a carry, then C was 15 or more and
+			;an overflow will happen, so return with carry set
+	RET Z		;if (14-C) is zero (C=14), then no need to shift
+			;we can just return with carry correctly unset, and HL
+			;containing the right number in the right form
+
+	CP 8		;see if we can discard the LSB of HL
+	JR NC,toHLShift8orMore
+	;need to shift less then 8 bits
+	LD B,A		;get number in counter
+toHLSLT8loop:
+	SRA H
+	RR L
+	DJNZ toHLSLT8loop
+	;end of loop
+	AND A		;reset carry
+	RET		;all done!
+
+
+
+toHLShift8orMore:
+	LD L,H		;"shift the first 8 bits here"
+	BIT 7,H		;what should MSB of HL be? (signedness)
+	LD H,0		;get it to zero here
+	JR Z,toHLS8oMHDiscarded	;if HL was positive, H is correctly discarded
+	DEC H		;get H to %11111111 if HL was negative
+toHLS8oMHDiscarded:
+	SUB 8		;shift 8 bits less (A still held number of bits to shift)
+	RET Z		;if A was 8, then all is set already (note that carry got reset)
+	LD B,A		;set up counter
+toHLS8oMloop:
+	SRA L
+	DJNZ toHLS8oMloop
+	;end of loop	
+	AND A		;reset carry
+	RET		;all done!	
+
+
+
+
+toHLReturnZero:
+	LD HL,0
+	AND A		;resets carry
+	RET
+
+
+
+
+
+
+
+
+
+;=========================================================================================
+;					pHLtoFLTPT
+;=========================================================================================
+;Converts a BCD number pointed to by HL to a floating point number in C-HL
+;Carry denotes overflow
+;Destroys: everything
+pHLtoFLTPT:
+	;bcall(_Mov9ToOP1)
+	rst 20h;rMOV9TOOP1
+	;natural fallthrough to OP1toFLTPT:
+
+
+
+;=========================================================================================
+;					OP1toFLTPT
+;=========================================================================================
+;Converts a BCD number in OP1 to a floating point number in C-HL
+;Carry denotes overflow
+;Destroys: everything
+
+
+OP1toFLTPT:
+	;first check for it being zero
+	LD HL,OP1+2	;first byte of mantissa
+	LD A,(HL)
+	AND %11110000	;TI sais: if first nibble is zero, all is zero
+	JR NZ,OP1toFLTPTnot0	;it wasn't zero
+	;just return zero, note that the above has cleared the carryflag
+	LD HL,0
+;	LD C,0		;not realy necesary ...
+	RET
+
+
+OP1toFLTPTnot0:
+	;save sign byte of number and make it positive to be able to take a logarithm
+	;HL still points to first byte of mantissa
+	DEC HL		;exponent
+	DEC HL		;sign byte
+	LD A,(HL)	
+	AND A		;set flags, and carry gets reset
+	push AF		;sign *and flags* get pushed
+	JP P,OP1toFLTPTpositive
+	;it was negative, get a positive sign in it's place
+	AND %01111111	;clear sign flag of read signbyte
+	LD (HL),A	;and save it
+	
+
+OP1toFLTPTpositive:
+	bcall(_LogX)		;get 10log of number
+	LD HL, log2
+	bcall(_Mov9ToOP2)	;get log(2) into OP2
+	bcall(_FPDiv)		;10log(x)/10log(2) -> OP1 now holds 2log(x)
+	;push on FPS to get it back later
+	RST 18h	;rPUSHREALO1
+	bcall(_Intgr)		;integer: ipart(x) if x>=0; ipart(x-1) if x<0
+	ld hl,OP1
+	bcall(_Mov9toOP2)	;copy it to OP2
+	call OP1toA		;this is our exponent, OP1 still holds the integer
+	JR C,OP1toFLTPToverflow
+	ld c,a
+	push bc			;save the exponent in C
+	bcall(_PopRealO1)	;get 2log(x) back
+	;2log(x) in OP1, int(2log(x)) in OP2
+	bcall(_FPSub)		;substract to get our "mantissa-exponent",
+				;it will always be positive
+
+
+
+	LD HL,OP1		;get adjusted exponent in OP2
+	bcall(_Mov9toOP2)
+
+	LD HL,bcd2		;get 2 in OP1
+	RST 20h		;bcall(_Mov9toOP1)
+
+	bcall(_YtoX)		;exponentiate
+	;OP1 now has the BCD mantissa to be stored
+	; 1 <= OP1 < 2
+
+	LD HL,bcd2
+	bcall(_Mov9toOP2)	;get 2 to OP2 to use below
+
+	LD HL,$0001		;first bit will always be set, because number is not zero
+	LD B,14			;we only need to fill the 14 other bits
+OP1toFLTPTloop:
+	push bc
+	push hl
+
+	bcall(_Frac)		;fractional part
+	bcall(_FPMult)		;OP1 = OP1 * OP2 (OP2=2 and gets preserved)
+
+	;when OP1 ends up being exactly zero, the exponent doesn't get adjusted 
+	;(or maybe gets put to $80, i need to check)
+	;So: we need to test if the number isn't zero first
+	LD HL,OP1+2	;first byte of mantissa
+	LD A,(HL)
+	AND %11110000
+	JR Z,OP1toFLTPTshiftSomeMore	;still need to shift remaining bits
+
+	DEC HL		;exponent byte
+	ld c,(hl)
+	ld a,$7F
+	cp c
+	pop hl
+	rl l
+	rl h
+	pop bc
+	djnz OP1toFLTPTloop
+	JR OP1toFLTPTloopDone
+
+OP1toFLTPTshiftSomeMore:
+	pop hl
+	pop bc
+OP1toFLTPTshiftSomeMoreLoop:
+	SLA L
+	RL H
+	DJNZ OP1toFLTPTshiftSomeMoreLoop
+
+OP1toFLTPTloopDone:
+	;we've got our (positive) mantissa in HL now
+	POP BC		;get exponent in C back again
+	POP AF		;get sign byte and flags back, sign flag is already set
+			;and carry got reset
+	RET P		;if sign was positive, all is ready to return
+	;set first bit of H
+	ld A,H
+	OR %10000000	;set first bit, carry gets reset too
+	LD H,A
+	RET
+
+OP1toFLTPToverflow:
+	pop af		;reset stack
+	bcall(_PopRealO1)	;and floating point stack
+	scf		;set carry
+	ret
+
+	
+
+
+
+;ln2:	;as used by calculator
+;	.DB $00, $7F, $69, $31, $47, $18, $05, $59, $95
+
+log2:	;wild guess: using BCD might mean that a 10log is faster than an ln
+	;(didn't verify this...)
+	.DB $00, $7F, $30, $10, $29, $99, $56, $63, $98
+
+bcd2:	;bcd floating point 2
+	.DB $00, $80, $20, $00, $00, $00, $00, $00, $00
+
+
+
+
+
+
+
+
+
+
+;Converts a BCD number in OP1 to a signed number in A. No rounding gets done.
+;Carry denotes overflow
+;Note: -128 is considered an overflow.
+;Destroys: HL,BC,OP1
+OP1toA:
+	;check trivial case: if exponent is strictly less than zero,
+	;output will be zero
+	LD HL,OP1+1	;exponent byte
+	LD A,(HL)
+	CP $80
+	JR NC,OP1toAexp0orMore	;A was $80 or more
+	;return zero, and reset carry (it is set atm)
+	XOR A		;reset carry and put zero in A in one step
+	RET		
+
+
+OP1toAexp0orMore:
+	LD B,3		;we could need up to three decimal digits
+	LD A,0		;result
+OP1toAloop:
+	;multiply result with 10 before we add the next digit
+	ADD A,A		;A*2 
+	RET C		;we could have gotten an "overflow" here
+	LD C,A		;temporarily store it
+	ADD A,A		;A*4
+	RET C
+	ADD A,A		;A*8
+	RET C
+	ADD A,C		;A*8 + A*2 = A*10
+	RET C
+	LD C,A		;store it
+
+	LD HL,OP1+3	;second mantissa-byte (fourth BCD digit)
+	XOR A		;zero A -- seems to be needed, looks like A just gets added
+			;with RLD [??]
+	RLD		;BCD rotate: LSNibble of (HL) to MSNib
+			;A to LSNib, MSNib to A
+	DEC HL		;first byte
+	RLD		;A now holds the decimal digit to add
+	ADD A,C		;add the result thus far
+	RET c		;overflow could happen
+	DEC HL		;exponent byte
+	DEC (HL)	;decrement exponent
+	JP P,OP1toAdone	;if (HL) became "positive" meaning: (HL) was $80 (exponent 0) 
+			;before and now became $7F (exponent (-1)). This means we have 
+			;done all digits.
+	DJNZ OP1toAloop
+	;If we made it here, the exponent was larger than 3, so the number can't
+	;fit in A. Return with carry set
+	SCF
+	RET
+
+OP1toAdone:	;A contains the transformed floating point number
+		;HL points to the exponent byte
+	;check for overflow for a signed number
+	LD C,A
+	LD A,126
+	CP C
+	RET C		;C is 127 or more, so it overflows a signed number (carry set)
+			;NOTE: -128 is also regarded an overflow
+	;carry is unset
+	LD A,C		;get answer back in A
+	DEC HL		;HL points to sign byte
+	DEC (HL)	;if HL is $80, sign is negative, if it is $00, sign is positive
+	RET PO		;trick: "signed overflow" happens if (HL) was $80. PO means:
+			;'no overflow', so (HL) was $00. Doing an DEC also left Carry
+			;unchanged, so all is well to return.
+	;the number was negative, so negate A, then return
+	NEG
+	AND A		;reset carry (NEG sets is unless A is 0, which it isn't)
+	RET
+
+
+
+
+
+
+;;Converts a BCD number in OP1 to an unsigned number in DE (sign flag is omitted)
+;;Carry denotes overflow
+;ConvOP1:
+;;NOTE: DOING THIS ON SOMETHING LESS THEN ONE WILL CAUSE MAYHEM (?)
+;;SO TEST FOR IT FIRST........................
+;	LD b,5		;get up to five decimal digits to form our number (up to 65535)
+;	LD de,0		;we'll store the result here (and use EX te swap)
+;ConvOP1_Loop:
+;	PUSH bc		;save counter
+;	XOR A		;zero A
+;	LD hl,OP1+4	;third byte (sixth BCD digit)
+;	RLD		;rotate nibble of (hl) to the left, A to LSnibble, MSnib to A
+;	DEC hl		;second byte
+;	RLD
+;	DEC hl		;first byte
+;	RLD		;A now contains the digit to add
+;	EX de,hl	;put pointer in de
+;	ADD hl,hl	;2*HL
+;	PUSH hl
+;	ADD hl,hl	;4*HL	maximum is 9999*4, which still fits a 16b register
+;	ADD hl,hl	;8*HL	maximum is 9999*8, which can cause an overflow
+;	JR c,ConvOP1_Return2	;carry == overflow
+;	POP bc
+;	ADD hl,bc	;2 + 8 -> 10*HL, can cause overflow
+;	JR c,ConvOP1_Return	;overflow
+;	LD b,0
+;	LD c,A
+;	ADD hl,bc	;add next digit, overflow can happen
+;	JR c,ConvOP1_Return
+;	EX de,hl	;get pointer again
+;	DEC hl		;points to exponent
+;	POP bc		;get counter
+;	DEC (hl)	;decrement exponent
+;	RET p		;if "sign change" -> exponent was $80 == 'exponent 0'
+;			;so we've done all the "integer digits", and carry is unset
+;			;stack is OK
+;	DJNZ ConvOP1_Loop
+;	SCF		;if we made it here, we needed more than 5 digits, so overflow
+;	RET		;-> set carry and return
+;ConvOP1_Return2:
+;	POP bc		;Get stack sorted out before we return,
+;ConvOP1_Return:		;because nasty stuff will happen
+;	POP bc		;if we don't.
+;	RET
+
+
+
+
+
+
+;=========================================================================================
+;					FLPTtoOP1
+;=========================================================================================
+;Converts a floating point number in C-HL to a BCD number in OP1 
+;Destroys: everything
+FLTPTtoOP1:
+	;TI has a nice system call: SetXXXXOP2: store the value of HL in OP1
+	
+	push hl		;save HL
+	push BC		;save C
+	
+	ld HL,bcd2
+	bcall(_Mov9toOP1)	;2 in OP1
+
+	POP BC		;get exponent in C
+	LD L,C	
+	SLA C		;get sign flag of exponent into carry
+	SBC A,A		;if exponent was negative, A is now $FF (else $00)
+	LD H,A		;exponent now in HL as signed number
+	AND A		;reset carry
+	LD BC,14
+	SBC HL,BC	;subtract 14 to get our 15-bit mantissa to a 1.xxx form
+	LD A,H
+	AND A
+	JP M,FLTPTtoOP1expNegative
+	;exponent was positive: just get it into OP2
+	bcall(_SetXXXXOP2)
+	JR FLTPTtoOP1calcDivider
+FLTPTtoOP1expNegative:
+	;negate the exponent, note that the carry got unset doing the AND A above
+	EX DE,HL	;swap to DE
+	LD HL,0
+	SBC HL,DE	;HL now holds the positive exponent
+	bcall(_SetXXXXOP2)
+	LD A,(OP2)
+	OR $80
+	LD (OP2),A	;sign of OP2 got set
+	;fall-through to FLTPTtoOP1calcDivider
+	
+
+
+
+
+	;WHY ON EARTH DOES THE SIGNED OVERFLOW FLAG BEHAVE SO NONSENSICAL DOING
+	;A SUB??? (OR IS IT JUST ME?)
+	;I've skipped the stuff below with a 16b alternative: no worries for overflows
+;	pop BC		;get exponent
+;	LD H,0		;we'll put it in HL later on, so zero H
+;	LD A,C
+;	call printa
+;	SUB 14		;substract 14 to get our mantissa to a 1.xxx form
+;			;(mantissa has 15 bits)
+;	call printa
+;
+;	JP PE,FLTPTtoOP1expOverflow	;a signed overflow happened
+;
+;	;no overflow happened, check sign of exponent the regular way
+;	call printmrk1
+;	JP M,FLTPTtoOP1expNegative	;check sign of adjusted exponent
+;	;exponent was positive, so just convert it
+;	call printmrk2
+;	LD L,A
+;	bcall(_SetXXXXOP2)	;exponent in OP2
+;	JR FLTPTtoOP1calcDivider
+;
+;
+;FLTPTtoOP1expOverflow:
+;	call printmrk3
+;	JP P,FLTPTtoOP1expNegative	;explanation:
+;	;we had a signed overflow doing a SUB, this means that a negative number
+;	;became "positive". (The sign flag got unset, we should add a "1" at b8)
+;	;We can fix this by setting H to $FF, but we actually want to get it
+;	;positive again to be able to load it into a BCD number. Because the overflow
+;	;can't have been enormous (we only subtracted 14), we can just negate it 
+;	;back again to get the proper positive (unsigned) value.
+;	;This just so happens to be the exact same thing as we would do when the
+;	;exponent was in fact negative. So let's just jump to that label :-)
+;
+;	;we didn't jump, so A is "negative" -- has bit 7 set
+;	;We had a signed overflow where a positive number became "negative".
+;	;The operation resulted in a 1 at b7, but it isn't a sign-flag.
+;	;However, all is well if we regard A as an *unsigned* number.
+;	;so just load it in OP2, sign should remain unset
+;	call printmrk4
+;	LD L,A
+;	bcall(_SetXXXXOP2)
+;	JR FLTPTtoOP1calcDivider
+;
+;
+;
+;FLTPTtoOP1expNegative:
+;	;exponent is negative
+;	NEG		;make it positive
+;	LD L,A
+;	bcall(_SetXXXXOP2)	;abs(exponent) in OP2
+;	LD A,(OP2)
+;	OR %10000000
+;	LD (OP2),A	;set sign flag: exponent in OP2
+	
+
+FLTPTtoOP1calcDivider:
+	;we've got 2 in OP1, exponent in OP2: exponentiate
+	bcall(_YtoX)	;OP1 contains factor to multiply mantissa with
+	
+	;import mantissa:
+	pop hl
+	ld A,H		;check for sign flag and get it in A for possible modifying
+	AND A		;set flags
+	JP P,FLTPTtoOP1positiveMantissa
+	;it's negative
+	AND %01111111	;clear sign flag
+	LD H,A		;save it
+	bcall(_SetXXXXOP2)	;HL to OP2 
+	LD A,(OP2)
+	OR %10000000
+	LD (OP2),A	;set sign of OP2 
+	;We've now got the multiplier in OP1 and the mantissa in OP2, so just multiply
+	bcall(_FPMult)
+	RET
+
+FLTPTtoOP1positiveMantissa:
+	bcall(_SetXXXXOP2)	;HL to OP2
+	;We've now got the multiplier in OP1 and the mantissa in OP2, so just multiply
+	bcall(_FPMult)
+	RET
+
+
+;bcd2:
+;	.DB $00, $80, $20, $00, $00, $00, $00, $00, $00
+
+

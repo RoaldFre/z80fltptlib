@@ -1,0 +1,124 @@
+;testfile to get a rough flops value :D
+
+#include "ti83plus.inc"
+
+.org $9D93
+.db	t2ByteTok, tAsmCmp
+
+savedsp .equ AppBackUpScreen
+
+	ld (savedsp),sp
+
+	ld hl,%0111111111111111
+	ld c,127
+	ld de,%0111111111111111
+	ld b,127
+	push hl
+	push de
+	push bc
+	
+	ld b,255
+loop1:
+	ld c,b
+	ld b,255
+
+	
+	ld hl,%0101101110011010
+;	ld de,%0100110001011011
+
+loop2:
+	push bc
+
+	ld bc,0
+	ld de,%1100110001011011
+	call prod
+	
+	ld bc,0
+	ld de,%1100110001011011
+	call prod
+
+	ld bc,0
+	ld de,%1100110001011011
+	call prod
+	ld bc,0
+	ld de,%1100110001011011
+	call prod
+	ld bc,0
+	ld de,%1100110001011011
+	call prod
+
+
+
+
+
+
+
+
+
+;	call printhlc
+;	call printdeb
+;	call printmrk1
+;	call pause
+
+	pop bc
+	djnz loop2
+	ld b,c
+	djnz loop1
+	
+	LD sp,(savedsp)
+	ret
+
+
+overf:
+	push hl
+	bcall(_NewLine)
+	ld hl,message
+	bcall(_PutS)
+	pop hl
+	ret
+
+
+
+overflow:
+	push BC
+	push hl
+
+	bcall(_NewLine)
+
+	
+	ld a,7
+	ld (CurCol),a
+	pop hl
+	bcall(_DispHL)
+
+
+	ld a,1
+	ld (CurCol),a
+	pop hl
+	ld h,0
+	bcall(_DispHL)
+
+
+	ld a,0
+	ld (CurCol),a
+	ld hl, message
+	bcall(_PutS)
+
+
+
+
+	ld sp,(savedsp)
+	ret
+
+
+message:
+	.DB "OV",0
+
+
+
+
+
+#include "fltptlib.z80"
+
+.end
+

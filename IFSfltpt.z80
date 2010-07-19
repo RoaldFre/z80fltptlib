@@ -1,0 +1,818 @@
+#include "ti83plus.inc"
+;#include "fltptlib.defines.z80"
+
+
+;Defines
+;=======
+;Pushes everyting, including OP1 and OP2, doesn't alter registers
+#define PUSHALL		push af\ push bc\ push de\ push hl\ push ix\    push af\ push bc\ push de\ push hl\ push ix\    bcall(_PushRealO1)\ bcall(_PushRealO2)\   pop ix\  pop hl\  pop de\  pop bc\  pop af
+			
+;Pops everything that has been pushed with PUSHALL
+#define POPALL		bcall(_PopRealO2)\  bcall(_PopRealO1)\  pop ix\  pop hl\  pop de\  pop bc\  pop af
+
+;FLTPTmult uses IX, quick define here to push/pop it
+#define	FLTPTmultIX	PUSH IX\	CALL FLTPTmult\		POP IX
+
+#define Mv9OP1	RST 20h
+
+
+;Variables
+;=========
+savedSP 	.equ AppBackupScreen		;2B
+numFixedPoints 	.equ AppBackupScreen + 2	;1B
+currentPtr	.equ AppBackupScreen + 3	;2B
+Xexp		.equ AppBackupScreen + 5	;1B
+Xmant		.equ AppBackupScreen + 6	;2B
+Yexp		.equ AppBackupScreen + 8	;1B
+Ymant		.equ AppBackupScreen + 9	;2B
+dXexp		.equ AppBackupScreen + 11	;1B
+dXmant		.equ AppBackupScreen + 12	;2B
+dYexp		.equ AppBackupScreen + 14 	;1B
+dYmant		.equ AppBackupScreen + 15	;2B
+randSeed	.equ AppBackupScreen + 17	;2B
+XwinFact	.equ AppBackupScreen + 19	;3B
+YwinFact	.equ AppBackupScreen + 22	;3B
+YpixelIndex	.equ AppBackupScreen + 25	;2B
+
+
+;start of continuous memorychunk that gets written to when parsing Ans
+XwinMin		.equ AppBackupScreen + 27	;3B, fltpt of "window"
+XwinMax		.equ AppBackupScreen + 30	;3B
+YwinMin		.equ AppBackupScreen + 33	;3B
+YwinMax		.equ AppBackupScreen + 36	;3B
+data		.equ AppBackupScreen + 39	;lots of bytes: our actual fixed
+						;point data
+startOfParseChunk	.equ	XwinMin		;alias of above
+
+;Dataformat:
+; x_1,		y_1,	factor_1*sin(theta_1),	factor_1*cos(theta_1),
+; x_2,		y_2,	factor_2*sin(theta_2),	factor_2*cos(theta_2),
+; ...
+; x_n,		y_n,	factor_n*sin(theta_n),	factor_n*cos(theta_n)
+;With n == *numFixedPoints
+;Each "row" gets reffered to as a "data line"
+
+
+;Format defines
+;==============
+;Each number gets saved with the 1B exponent first, and the 2B
+;mantissa gets saved in little endian format
+;e.g: fltpt "c-hl" gets saved as: "C|L|H"
+Xofs		.equ 0	;Ofs -> offset within each "line of data"
+Yofs		.equ 3
+sinOfs		.equ 6
+cosOfs		.equ 9
+factOfs		.equ 12
+
+;Various defines
+;================
+;AppBackupScreen has room for 768 bytes in total
+;each "line" in our data block contains 4 fltpt numbers,
+;each 3 bytes long (12B in total), so we can have up to:
+;( (AppBackupScreen + 767) - data ) / 12
+;elements
+maxElementsPlus1	.equ 58 + 1	;equals 696 bytes
+			;because of the way we compare: add +1
+innerLoopIterations	.equ 200		;should fit in 1 byte 
+FLTPT63exp		.equ 5
+FLTPT63mant		.equ %0111111000000000
+FLTPT95exp		.equ 6
+FLTPT95mant		.equ %0101111100000000
+
+
+
+
+
+
+
+.org $9D93
+.db	t2ByteTok, tAsmCmp
+	
+	LD (savedSP),SP		;so we don't mess up the stack
+
+
+;============
+; PARSE INPUT
+;============
+;;Input is a matrix in Ans with the format as specified above ("Dataformat")
+	bcall(_RclAns)
+	LD HL,OP1
+	LD A,(HL)
+	CP MatObj
+	JP NZ,noMatrixGiven
+
+	;DE is pointer to our data
+	EX DE,HL		;get it to HL
+	LD A,(HL)		;number of columns
+	CP 4
+	JP NZ,wrongInput	;must be 4
+	INC HL
+	LD A,(HL)		;number of rows (== number of fixed points + 1 (window))
+	CP maxElementsPlus1
+	JP NC,wrongInput	;overflow
+	LD B,A			;store it as a counter for use below
+	DEC A			;skip window row
+	JP Z,wrongInput
+	LD (numFixedPoints),A	;store it
+
+
+	
+	;ANS: BCD TO FLOATING POINT LOOP
+	;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	;Loop and convert all BCD input into our floating point
+	;format and save.
+	;HL still points back to the number of rows. Increment it to make
+	;it point to the data.
+	INC HL
+	;B holds the number of rows in our inputmatrix. Multiply by four
+	;to loop over all numbers.
+	SLA B
+	SLA B
+	LD DE,startOfParseChunk	;Destination of the converted data
+convertDataLoop:
+	PUSH BC			;save counter
+	PUSH DE			;save destination pointer
+	;HL is pointer to BCD floating point number
+	Mv9OP1
+	;HL is now incremented with 9 and pointing to next BCD number
+	EX (SP),HL		;swap it with the pushed DE
+				;the stack now holds 1) the source pointer	
+				; (HL holds the pushed DE)
+	PUSH HL			;and 2) the destination pointer after that
+	
+	CALL OP1toFLTPT		;convert the BCD number
+	JP C,overflow
+	;number in C-HL
+		
+	EX DE,HL		;store it in DE
+	POP HL			;so we can pop destination pointer in HL
+	LD (HL),C		;save exponent
+	INC HL
+	LD (HL),E		;save LSB mantissa
+	INC HL
+	LD (HL),D		;save MSB mantissa
+	INC HL
+	EX DE,HL		;DE holds destination pointer again
+	POP HL			;HL holds source pointer again
+	POP BC			;pop counter
+	DJNZ convertDataLoop
+
+
+	;INITIALISE OUR VARIABLES
+	;~~~~~~~~~~~~~~~~~~~~~~~~
+	;Compute the XwinFact and YwinFact
+	CALL computeWinFact
+	
+	;Initialize our point with the coordinates of the first fixed point.
+	LD A, (data + Xofs + 0)
+	LD (Xexp),A
+	LD HL,(data + Xofs + 1)
+	LD (Xmant),HL
+	LD A, (data + Yofs + 0)
+	LD (Yexp),A
+	LD HL,(data + Yofs + 1)
+	LD (Ymant),HL
+
+
+	;CLEAR SCREEN
+	;~~~~~~~~~~~~
+	;Clear our screen to begin drawing
+	;We could choose the easy route of just clearing the entire screen using
+	;a bcall(_ClrScrnFull) and the likes. But doing it the way we do it now
+	;allows us to keep te axes drawn (and even functions will still be plotted)
+	;We basically do a ClrDraw.
+	;We can't directly access the ClrDraw routine from a documented systemcall
+	;(TODO: might search for the location in a ROM disassembly...)
+	;But we can do it a hacky way: make a temporary program with "ClrDraw" as
+	;only statement and parse that program. We can use a temporary program for
+	;this.
+	;Test for existence first
+	LD HL,ClrDrawProgName
+	Mv9OP1
+	bcall(_ChkFindSym)	;preserves OP1
+	JR C,noOldTempProg
+	bcall(_DelVar)		;delete it, preserves OP1
+
+noOldTempProg:
+	LD HL,3	;our temporary program will have a length of 1 byte, and 2 bytes to
+		;specify that length (TODO: should I just specify 1? ... ah well:
+		;better be on the safe side)
+	bcall(_CreateProg)	;OP1 gets destroyed
+	;DE is data pointer
+	EX DE,HL
+	LD (HL),1
+	INC HL
+	LD (HL),0	;the 2B length
+	INC HL
+	LD (HL),tClDrw
+	;get variable name again
+	LD HL,ClrDrawProgName
+	Mv9OP1
+	bcall(_ParseInp)	;execute it
+	;however "temporary" it may be ... the OS doesn't seem to clean it up
+	;so do so manually:
+        LD HL,ClrDrawProgName
+        Mv9OP1
+        bcall(_ChkFindSym)
+        bcall(_DelVar)	
+
+
+	;Initialize our counter
+	LD B,innerLoopIterations
+
+
+
+;=============
+;  Main loop
+;=============
+;We've got everything set up and are ready to rock 'n roll!
+mainLoop:
+	PUSH BC			;Save counter
+
+	;call printmrk1
+	;call printxy
+
+	;Choose a random fixed point
+	;~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	;We should add a value from 0 to (numFixedPoints - 1) times 12 
+	;(4 numbers of 3 bytes each) to our data-pointer to get a "data line" pointer
+	LD A,(numFixedPoints)
+	LD B,A
+	;Random number routine from the ION shell for the TI-83+
+	LD HL,(randSeed)	;Get seed
+	LD A,R			;get "hardware random number"
+	LD D,A			;in D
+	LD E,(HL)		;and random byte in E
+	ADD HL,DE		;add seed with DE
+	ADD A,L			;add "R" to LSB of adjusted seed
+	XOR H			;cripple A ("R")
+	LD (randSeed),HL	;save the seed
+	SBC HL,HL		;HL = 0
+	LD E,A			;DE = 0A = crippled "R"
+	LD D,H
+randomLoop:
+	ADD HL,DE		;after loop:
+	DJNZ randomLoop		;H = E * B / 256 
+				;so: 0 <= H < B
+	;Random number in H
+	
+	;multiply by 12 and add basepointer to data
+	LD L,H		;get random number in HL
+	LD H,0		;
+	LD D,H
+	LD E,L		;and DE
+	ADD HL,HL	;HL*2
+	ADD HL,DE	;HL*3
+	ADD HL,HL	;HL*6
+	ADD HL,HL	;HL*12
+	LD IX,data	;base pointer
+	EX DE,HL	;             swap because...
+	ADD IX,DE	;add offset (...we can't add HL)
+
+
+	;Calculate the deltaX and deltaY
+	;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	;delta X
+	;X_P to B-DE
+	LD B,(IX + Xofs + 0)
+	LD E,(IX + Xofs + 1)
+	LD D,(IX + Xofs + 2)
+	;CurrentX to C-HL
+	LD HL,(Xmant)
+	LD A,(Xexp)
+	LD C,A
+	;do the subtraction: X - X_P
+	CALL FLTPTsub
+	JP PE,overflow
+	;save
+	LD A,C
+	LD (dXexp),A
+	LD (dXmant),HL
+
+	;delta Y
+	;Y_P to B-DE
+	LD B,(IX + Yofs + 0)
+	LD E,(IX + Yofs + 1)
+	LD D,(IX + Yofs + 2)
+	;CurrentY to C-HL
+	LD HL,(Ymant)
+	LD A,(Yexp)
+	LD C,A
+	;subtract
+	call FLTPTsub
+	JP PE,overflow
+	LD A,C
+	LD (dYexp),A
+	LD (dYmant),HL
+
+
+	;Calculate the new X and Y values
+	;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	;THE NEW X
+	;---------
+	;X' = X_P  +  (X - X_P) * R*cos(theta) - (Y - Y_P) * R*sin(theta) 
+	;R being (1 / contractionfactor)
+
+	;I've still got (Y - Y_P) in C-HL, so do the (Y - Y_P) * R*sin(theta)
+	;first.
+	;Get R*sin(theta) stuffed in B-DE
+	LD B,(IX + sinOfs + 0)		
+	LD E,(IX + sinOfs + 1)	
+	LD D,(IX + sinOfs + 2)
+	FLTPTmultIX		;preserves IX
+	JP PE,overflow
+	;save it, we need to get it again later to put in B-DE to subtract
+	PUSH HL
+	LD A,C	;exponent in A for easy popping later on
+	PUSH AF
+
+	;Compute the (X - X_P) * R*cos(theta) part
+	LD A,(dXexp)
+	LD C,A
+	LD HL,(dXmant)
+	LD B,(IX + cosOfs + 0)
+	LD E,(IX + cosOfs + 1)
+	LD D,(IX + cosOfs + 2)
+	FLTPTmultIX
+	JP PE,overflow
+
+	;Get (Y - Y_P) * R*sin(theta) in B-DE
+	POP AF
+	LD B,A
+	POP DE
+	;and subtract them
+	CALL FLTPTsub
+	JP PE,overflow
+	;and finally add X_P
+	LD B,(IX + Xofs + 0)
+	LD E,(IX + Xofs + 1)
+	LD D,(IX + Xofs + 2)
+	CALL FLTPTadd
+	JP PE,overflow
+	;C-HL now contains the new X-value: store it
+	LD A,C
+	LD (Xexp),A
+	LD (Xmant),HL
+
+
+	;THE NEW Y:
+	;----------
+	;Y' = Y_P  +  (X - X_P) * R*sin(theta) + (Y - Y_P) * R*cos(theta) 
+	LD A,(dXexp)
+	LD C,A
+	LD HL,(dXmant)
+	LD B,(IX + sinOfs + 0)
+	LD E,(IX + sinOfs + 1)
+	LD D,(IX + sinOfs + 2)
+	FLTPTmultIX
+	JP PE,overflow
+	PUSH HL
+	LD A,C
+	PUSH AF
+
+	LD A,(dYexp)
+	LD C,A
+	LD HL,(dYmant)
+	LD B,(IX + cosOfs + 0)
+	LD E,(IX + cosOfs + 1)
+	LD D,(IX + cosOfs + 2)
+	FLTPTmultIX
+	JP PE,overflow
+	
+	POP AF
+	LD B,A
+	POP DE
+	CALL FLTPTadd
+	JP PE,overflow
+	LD B,(IX + Yofs + 0)
+	LD E,(IX + Yofs + 1)
+	LD D,(IX + Yofs + 2)
+	CALL FLTPTadd
+	JP PE,overflow
+
+	LD A,C
+	LD (Yexp),A
+	LD (Ymant),HL
+
+
+
+	;See if they are printable (in the window)
+	;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	;Note that C-HL still holds the Y-coordinate, so start with that one
+	;Remark: the PlotSScreen bitmap has the vertical coordinates "reversed":
+	;0 is at the top and 63 is at the bottom. So we should do:
+	;(YwinMax - Y) * "YwinFact"
+	;To save some cycles: YwinFact is a negative number
+	LD A,(YwinMax)
+	LD B,A
+	LD DE,(YwinMax + 1)
+	CALL FLTPTsub	;(Y - YwinMax)
+	JP PE,noDraw	;it created an overflow ... we certainly can't draw it then
+	;if result is positive: we can't draw it (Y > YwinMax)
+	LD A,H
+	AND A
+	JP P,noDraw
+	;now multiply the translated value with our factor
+	LD A,(YwinFact)
+	LD B,A
+	LD DE,(YwinFact + 1)
+	CALL FLTPTmult		;from now on, IX doesn't need to be preserved anymore
+	JP PE,noDraw
+	;Convert the FLTPT number to a (signed) number in A
+	;We know it can't be negative, so we can treat it as unsigned
+	CALL FLTPTtoA
+;;	JP PE,noDraw	;IF USING "FLTPTtoAround"
+	JP C,noDraw	;we overflowed, so we certainly can't fit it on screen
+	CP 64
+	JP NC,noDraw	;If 64 or larger: we can't draw it
+	;A is a valid Y pixel index, store it in to use later on
+	LD (YpixelIndex),A
+	XOR A
+	LD (YpixelIndex+1),A	;TODO: better way?
+
+
+	;Now convert the X-coordinate
+	LD A,(Xexp)
+	LD C,A
+	LD HL,(Xmant)
+	LD A,(XwinMin)
+	LD B,A
+	LD DE,(XwinMin + 1)
+	CALL FLTPTsub
+	JP PE,noDraw
+	LD A,H
+	AND A
+	JP M,noDraw
+	LD A,(XwinFact)
+	LD B,A
+	LD DE,(XwinFact + 1)
+	CALL FLTPTmult
+	JP PE,noDraw
+	CALL FLTPTtoA
+	JP C,noDraw
+	CP 96
+	JP NC,noDraw
+	;A now holds the valid X pixel index
+
+	
+	;Get the address of the pixelbyte in the "framebuffer", and
+	;get a mask of the specific pixel within that byte
+	;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	;PlotSScreen holds a 12*64 bytes bitmap
+	;correct pointer == PlotSScreen + 12 * Yindex + Xindex/8
+	LD HL,(YpixelIndex)
+	LD D,H		;is zero
+	LD E,L
+	ADD HL,HL	;HL*2
+	ADD HL,DE	;HL*3
+	ADD HL,HL	;HL*6
+	ADD HL,HL	;HL*12
+	
+	LD E,A		;X pixel index
+	SRL E		;E/2
+	SRL E		;E/4
+	SRL E		;E/8
+	ADD HL,DE	;(D is zero)
+
+	LD DE,PlotSScreen
+	ADD HL,DE	;Pointer is now set up accordingly
+
+	;get bitmask: put a 1 at position (7 - (A mod 8))
+	AND %00000111	;mod 8
+	LD B,A		;make it a counter
+	LD A,%10000000	;this will be shifted (rotated) right
+	JR Z,activatePixel	;ifAmod8 was zero: skip shifting
+getPixelLoop:
+	RRA		;in this case equivalent to SRL A, but twice as fast!
+	DJNZ getPixelLoop
+
+activatePixel:
+	;Activate the pixel
+	;~~~~~~~~~~~~~~~~~~
+	OR (HL)		;OR bitmask with original byte
+	LD (HL),A	;And save
+
+noDraw:
+
+	;Check for keypresses
+	;~~~~~~~~~~~~~~~~~~~~
+	;[ENTER] quits
+	LD A,$FD
+	OUT (1),A	;send group to keyport
+	NOP
+	NOP		;delay: wait for keyport to respond TODO: necesary??
+	IN A,(1)
+	BIT 6,A
+	JR Z,exit
+	;in case of enter:
+	;SRL A		;faster way: get bit 0 in carry
+	;JR NC,exit	
+
+
+
+	;End of inner loop
+	;~~~~~~~~~~~~~~~~~
+	POP BC		;get our counter back
+	;DJNZ mainLoop --- relative jump too long :(
+	DEC B
+	JP NZ,mainLoop
+
+
+	;Outer loop
+	;==========
+
+	;Update the framebuffer
+	;~~~~~~~~~~~~~~~~~~~~~~
+	;We did "innerLoopIterations" iterations, so it's time to copy
+	;PlotSScreen to the framebuffer
+	bcall(_GrBufCpy)
+	LD B,innerLoopIterations	;reset our pointer
+	JP mainLoop
+
+
+
+;===================
+;  End of mainloop
+;===================
+	
+
+exit:
+	LD SP,(savedsp)
+	RET
+
+
+; DEBUG ROUTINES
+;==========================================================================
+;Print X and Y from ram in floating point format
+printXY:
+	PUSHALL
+	ld hl,(xmant)
+	ld a,(xexp)
+	ld c,a
+	call pchl
+	ld hl,(ymant)
+	ld a,(yexp)
+	ld c,a
+	call pchl
+	POPALL
+	ret
+
+printIX:
+	PUSHALL
+	PUSH IX
+	EX (SP),HL
+	LD C,111
+	CALL printhlc
+	POP HL
+	POPALL
+	RET
+
+;loop over the fixed point data and print one by one
+printData:
+	PUSHALL	
+	ld a,(numFixedPoints)
+	ld b,a
+	sla b
+	sla b
+	ld hl,data
+printDataLoop:
+	push bc
+	ld a,b
+	AND 3	;modulo 4
+	JR NZ,printDataLoopNoPause
+	call enterpause
+printDataLoopNoPause:
+	ld b,(hl)
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	inc hl
+	call printdeb
+	call pbde
+	pop bc
+	djnz printDataLoop
+	call enterpause
+	POPALL
+	ret
+
+
+;Print current dataline, pointer in IX
+printDataLine:
+	PUSHALL
+	
+	call printmrk6
+
+	ld a,(ix)
+	call printa
+	ld a,(ix+1)
+	call printa
+	ld a,(ix+2)
+	call printa
+	call enterpause
+
+	call printData
+
+
+	ld c,(IX + Xofs + 0)
+	ld l,(IX + Xofs + 1)
+	ld h,(IX + Xofs + 2)
+	call printhlc
+	call pchl
+					call enterpause
+	ld c,(IX + Yofs + 0)
+	ld l,(IX + Yofs + 1)
+	ld h,(IX + Yofs + 2)
+	call printhlc
+	call pchl
+	ld c,(IX + sinOfs + 0)
+	ld l,(IX + sinOfs + 1)
+	ld h,(IX + sinOfs + 2)
+	call printhlc
+	call pchl
+	ld c,(IX + cosOfs + 0)
+	ld l,(IX + cosOfs + 1)
+	ld h,(IX + cosOfs + 2)
+	call printhlc
+	call pchl
+	POPALL
+	RET
+	
+
+
+
+
+
+
+; FLOATING POINT ROUTINES
+;==========================================================================
+#include "fltptlib.z80"
+
+
+
+; VARIOUS ROUTINES
+;==========================================================================
+computeWinFact:
+	;Calculates the window factors. XwinFact is used as a factor to
+	;multiply (X - XwinMin) in such a way to get a value that satisfies:
+	; 0 <= value <= 95
+	;YwinFact is similar, but we get a value that satisfies:
+	; 0 <= value <= 63
+	;NOTE: YwinFact is a negative number, see remarks at usage
+
+	;Compute XwinFact:
+	LD A,(XwinMax)
+	LD C,A
+	LD HL,(XwinMax + 1)
+	LD A,(XwinMin)
+	LD B,A
+	LD DE,(XwinMin + 1)
+	CALL FLTPTsub
+	JP PE,overflow
+	;difference must be positive
+	LD A,H
+	AND A
+	JP M,wrongWindow
+	;C-HL holds difference
+	;our factor should be: 95 / difference
+	;I haven't implemented a division yet atm, so take the inverse of
+	;C-HL the easy/ugly way :P
+	CALL FLTPTtoOP1
+	bcall(_FPRecip)		;get reciprocal
+	CALL OP1toFLTPT
+	JP C,overflow
+	;multiplication however *is* supported :P
+	;get 95 in B-DE
+	LD B,FLTPT95exp
+	LD DE,FLTPT95mant
+	CALL FLTPTmult
+	JP PE,overflow
+	;save
+	LD A,C
+	LD (XwinFact),A
+	LD (XwinFact + 1),HL
+
+	;Compute YwinFact:
+	LD A,(YwinMax)
+	LD C,A
+	LD HL,(YwinMax + 1)
+	LD A,(YwinMin)
+	LD B,A
+	LD DE,(YwinMin + 1)
+	CALL FLTPTsub
+	JP PE,overflow
+	LD A,H
+	AND A
+	JP M,wrongWindow
+	CALL FLTPTtoOP1
+	bcall(_FPRecip)
+	CALL OP1toFLTPT
+	JP C,overflow
+	;Multiply with 63
+	LD B,FLTPT63exp
+	LD DE,FLTPT63mant
+	CALL FLTPTmult
+	JP PE,overflow
+	LD A,C
+	LD (YwinFact),A
+	LD A,H
+	OR $80		;make it negative
+	LD H,A
+	LD (YwinFact + 1),HL
+	RET
+
+
+
+
+
+BCDeTimesPi:
+	.DB 	$0C,$80, $85,$39,$73,$42,$22,$67,$35
+
+noMatrixGiven:
+	;Test if the value in OP1 is complex and if (OP1,OP2) hold our
+	;magic: e*pi*i (no powers in there, so no trivial "-1" answer :P)
+	;Else returns with usage instructions
+	;First byte of OP1 should be $0C (or $8C will do too? "-0")
+	LD HL,OP1
+	LD A,(HL)
+	AND %01111111
+	CP $0C
+	JP NZ,wrongInput
+	;it's the real part of a complex number
+	INC HL		;exponent
+	INC HL		;get to first byte
+	LD A,(HL)
+	AND $F0		;TI says: first nibble equals zero == all equals zero
+	JP NZ,wrongInput
+	LD HL,BCDeTimesPi
+	LD DE,OP2
+	LD B,7		;7 bytes to compare
+noMatrixGivenLoop:
+	LD A,(DE)
+	CP (HL)
+	JP NZ,wrongInput
+	INC HL
+	INC DE
+	DJNZ noMatrixGivenLoop
+	;fall-through to intro-routine:
+
+; INTRO ROUTINE
+;==========================================================================
+;Displays a splash screen. Used in combination with a magic (e*pi*i in Ans)
+;in a TI-BASIC program to convert a regular IFS-matrix into our IFSfltpt-
+;matrix Ans type. Displayed during time of conversion.
+intro:
+	LD HL,introPic
+	LD DE,PlotSScreen
+	LD BC,64*12
+	LDIR
+	bcall(_GrBufCpy)
+	JP exit
+
+introPic:
+#include "introPic.z80"
+
+
+
+
+; ERROR HANDLING ROUTINES
+;==========================================================================
+wrongInput:
+	LD HL,wrongInputMsg
+	JR printErrorMessage
+wrongInputMsg:
+.DB "Wrong input!",0
+
+wrongWindow:
+	LD HL,wrongWindowMsg
+	JR printErrorMessage
+wrongWindowMsg:
+.DB "ERR: WindowSize!",0
+
+overflow:
+	LD HL,overflowMsg
+	JR printErrorMessage
+overflowMsg:
+.DB "ERR: Overflow!",0
+
+	
+printErrorMessage:
+	;HL is pointer to string, up to 16 chars
+	push hl
+	bcall(_ClrScrnFull)
+	LD HL,0
+	LD (CurRow),HL		;cursor to upper left
+	pop hl
+	bcall(_PutS)
+	bcall(_NewLine)
+	JP exit
+
+
+
+
+
+; SOME DATA
+;==========================================================================
+ClrDrawProgName:
+	.DB TempProgObj,tZ,tC,tL,tR,tD,tR,tA,tW	;ZCLRDRAW, "Z":get it at
+						;bottom of PRGMlist

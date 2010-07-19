@@ -1,0 +1,110 @@
+#include "ti83plus.inc"
+
+.org $9d93
+.db t2ByteTok, tAsmCmp
+
+savedsp .equ AppBackUpScreen
+
+	ld (savedsp),sp
+
+	bcall(_NewLine)
+	bcall(_RclAns)	;i expect list, DE is data pointer
+
+	inc de
+	inc de	;skip length bytes
+	push de
+	ex de,hl
+	bcall(_Mov9toOP1)
+;	call printop1
+	call op1toa
+	push af
+	call printa
+
+	pop af
+	pop hl
+	push af
+	ld de,09
+	add hl,de
+	bcall(_Mov9toOP1)
+;	call printop1
+	call op1toa
+	call printa
+	pop bc
+	;1st in b, 2nd in a
+
+	ld c,a
+	ld a,b
+	ld b,c
+	;1st in A, 2nd in B
+
+	sub b
+
+	call printa
+
+
+;	push af
+;	JP    PO, $+5	; P/V reset, and XORing with zero does nothing
+;	XOR   $80	; XOR with sign byte
+;	; Can now use M for A<B, or P for A>=B
+;
+;	JP P,larger
+;	call printmrk1
+;	pop af
+;	neg
+;	call printa
+;	ret
+;
+;larger:
+;	pop af
+;	call printa
+;	ret
+
+
+
+
+	jp po,flagpo
+	jp p,flagpeP
+
+	call printmrk1	;overflow and negative flag
+	;NEG
+	;neg flag, no worries when unsigned
+	call printa
+	ret
+
+flagpeP:
+	call printmrk2	;overflow and positive flag
+	;mantissas should be switched
+	NEG
+	call printa
+	ret
+
+flagpo:
+	jp p,flagpoP
+	;poM
+	call printmrk3	;no overflow, answer is negative
+	;mantissas OK
+	NEG
+	call printa
+	ret
+flagpoP:
+	call printmrk4	;no overflow, anwer is positive
+	;mantissas OK
+	call printa
+	ret
+
+
+
+
+
+	jp po,noOver
+	;overflow
+	call printmrk6
+	call printmrk6
+	ret
+
+noOver:
+	;no overflow
+	call printmrk1
+	ret
+
+#include "fltptlib.z80"
